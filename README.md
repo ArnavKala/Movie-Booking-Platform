@@ -41,6 +41,35 @@ npm run create-admin -- admin@example.com "StrongPass123" "Admin Name"
 Registration always creates `USER` accounts; use `create-admin` to create or promote the first ADMIN.
 Health check: `curl http://localhost:5000/api/health`
 
+### Deploy the API to Vercel
+
+Create a Vercel project with `backend` as its Root Directory. The included
+`vercel.json` and `api/index.js` run the existing Express application as a
+serverless function. Add these environment variables in the Vercel project
+settings, using production values:
+
+```text
+MONGODB_URI
+JWT_SECRET
+JWT_EXPIRES_IN
+NODE_ENV=production
+RAZORPAY_TEST_API_KEY
+RAZORPAY_TEST_API_SECRET
+RAZORPAY_WEBHOOK_SECRET
+PUBLIC_APP_URL
+CLOUDINARY_CLOUD_NAME
+CLOUDINARY_API_KEY
+CLOUDINARY_API_SECRET
+CLOUDINARY_FOLDER
+```
+
+Do not upload `.env` or put backend secrets in the frontend project. Update
+`PUBLIC_APP_URL` to the deployed frontend URL before using payment callbacks.
+Set `CORS_ORIGINS` to the comma-separated frontend origins, for example
+`https://goodshowcinema-techteam.vercel.app`.
+The frontend API base URL should be the deployed backend URL followed by
+`/api`.
+
 Configure Cloudinary to upload movie posters and trailers from Admin → Movies. The backend signs short-lived uploads at `GET /api/admin/uploads/signature`; the browser uploads directly to Cloudinary, so media files do not pass through the API server. Never put `CLOUDINARY_API_SECRET` in the frontend or a `VITE_*` variable.
 
 Restart the backend after changing any Cloudinary value in `.env`; environment variables are read when Node starts. If Cloudinary reports `Invalid Signature`, verify that the cloud name, API key, and API secret all come from the same Cloudinary account and that there are no extra spaces. Rotate the API secret immediately if it has been exposed.

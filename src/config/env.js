@@ -26,7 +26,14 @@ module.exports = {
   RAZORPAY_KEY: process.env.RAZORPAY_TEST_API_KEY,
   RAZORPAY_SECRET: process.env.RAZORPAY_TEST_API_SECRET,
   RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET,
-  PUBLIC_APP_URL: (process.env.PUBLIC_APP_URL || 'http://localhost:5173').replace(/\/$/, ''),
+  PUBLIC_APP_URL: (
+    process.env.PUBLIC_APP_URL ||
+    (NODE_ENV === 'production' ? 'https://goodshowcinema-techteam.vercel.app' : 'http://localhost:5173')
+  ).replace(/\/$/, ''),
+  CORS_ORIGINS: (process.env.CORS_ORIGINS || 'http://localhost:5173,https://goodshowcinema-techteam.vercel.app')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean),
   CLOUDINARY_CLOUD_NAME: trimEnv(process.env.CLOUDINARY_CLOUD_NAME),
   CLOUDINARY_API_KEY: trimEnv(process.env.CLOUDINARY_API_KEY),
   CLOUDINARY_API_SECRET: trimEnv(process.env.CLOUDINARY_API_SECRET),
