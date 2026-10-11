@@ -1,0 +1,111 @@
+const request = require('supertest');
+const crypto = require('crypto');
+const app = require('../src/app');
+const db = require('./helpers/db');
+const { createUser, createAdmin, auth, createBookableShow } = require('./helpers/factories');
+const { signed, book } = require('./helpers/paidBook');
+const { Payment, Booking, Show } = require('../src/models');
+const gateway = require('../src/services/razorpay.service');
+const service = require('../src/services/payment.service');
+const env = require('../src/config/env');
+beforeAll(db.connect);
+afterAll(db.disconnect);
+afterEach(async () => { jest.restoreAllMocks(); await db.clear(); });
+async function checkout() {
+  const user = await createUser();
+  const fixture = await createBookableShow();
+  const body = { showId: fixture.show._id, seatIds: [fixture.seats.A1._id], requestId: crypto.randomUUID(), totalAmount: 1 };
+  const result = await request(app).post('/api/payments/orders').set(auth(user.token)).send(body);
+  expect(result.status).toBe(201);
+  return { ...fixture, ...user, body, checkout: result.body.data };
+}
+const verify = (context, payload) => request(app).post('/api/payments/verify').set(auth(context.token)).send(payload);
+it('reserves seats, prices in paise, prevents duplicate orders and blocks payment bypass', async () => {
+  const c = await checkout();
+  expect(c.checkout.amount).toBe(20000);
+  expect(await Booking.countDocuments()).toBe(0);
+  const map = await request(app).get(`/api/shows/${c.show._id}/seats`);
+  expect(map.body.data.seats[0].status).toBe('HELD');
+  const duplicate = await request(app).post('/api/payments/orders').set(auth(c.token)).send(c.body);
+  expect(duplicate.body.data._id).toBe(c.checkout._id);
+  expect(await Payment.countDocuments()).toBe(1);
+  expect((await request(app).post('/api/bookings').set(auth(c.token)).send(c.body)).status).toBe(402);
+});
+it('rejects forged signatures, wrong ownership, and tampered amounts', async () => {
+  const c = await checkout(); const payment = gateway.__pay(c.checkout.orderId);
+  expect((await verify(c, { ...signed(c.checkout, payment), razorpay_signature: '0'.repeat(64) })).status).toBe(400);
+  const other = await createUser();
+  expect((await verify(other, signed(c.checkout, payment))).status).toBe(404);
+  const invalid = gateway.__pay(c.checkout.orderId, { amount: 1 });
+  expect((await verify(c, signed(c.checkout, invalid))).status).toBe(400);
+  expect(await Booking.countDocuments()).toBe(0);
+});
+it('only confirms captured payments and handles simultaneous callbacks idempotently', async () => {
+  const c = await checkout();
+  const failed = gateway.__pay(c.checkout.orderId, { status: 'failed' });
+  expect((await verify(c, signed(c.checkout, failed))).body.data.state).toBe('PENDING');
+  expect(await Booking.countDocuments()).toBe(0);
+  const payment = gateway.__pay(c.checkout.orderId, { status: 'authorized' });
+  const results = await Promise.all([verify(c, signed(c.checkout, payment)), verify(c, signed(c.checkout, payment))]);
+  results.forEach(r => expect(r.status).toBe(200));
+  expect(await Booking.countDocuments()).toBe(1);
+  expect(results[0].body.data.booking.paymentStatus).toBe('PAID');
+});
+it('refunds a late captured payment without taking seats from a newer reservation', async () => {
+  const c = await checkout();
+  await Payment.updateOne({ _id: c.checkout._id }, { expiresAt: new Date(Date.now() - 1000) });
+  const other = await createUser();
+  const booked = await book(other.token, c.show._id, [c.seats.A1._id]);
+  expect(booked.status).toBe(201);
+  const late = gateway.__pay(c.checkout.orderId);
+  const result = await verify(c, signed(c.checkout, late));
+  expect(result.body.data.state).toBe('REFUNDED');
+  expect(result.body.data.booking).toBeNull();
+  expect(await Booking.countDocuments()).toBe(1);
+});
+it('keeps refunds queued during an outage and safely retries', async () => {
+  const c = await checkout(); const payment = gateway.__pay(c.checkout.orderId);
+  const paid = await verify(c, signed(c.checkout, payment));
+  const spy = jest.spyOn(gateway, 'refund').mockRejectedValueOnce(new Error('Provider unavailable'));
+  const cancelled = await request(app).delete(`/api/bookings/${paid.body.data.booking._id}`).set(auth(c.token));
+  expect(cancelled.body.data.paymentStatus).toBe('REFUND_PENDING');
+  spy.mockRestore();
+  await service.reconcile(c.checkout._id, c.user);
+  expect((await Payment.findById(c.checkout._id)).state).toBe('REFUNDED');
+  expect((await Booking.findById(paid.body.data.booking._id)).paymentStatus).toBe('REFUNDED');
+});
+it('recovers a lost checkout callback from a signed webhook and rejects tampering', async () => {
+  const c = await checkout(); const payment = gateway.__pay(c.checkout.orderId);
+  const raw = JSON.stringify({ event: 'payment.captured', payload: { payment: { entity: payment } } });
+  const signature = crypto.createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET).update(raw).digest('hex');
+  expect((await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('x-razorpay-signature', '0'.repeat(64)).send(raw)).status).toBe(400);
+  for (let i = 0; i < 2; i++) expect((await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('x-razorpay-signature', signature).send(raw)).status).toBe(200);
+  expect(await Booking.countDocuments()).toBe(1);
+});
+it('protects PDF/QR tickets and permits only one admin check-in', async () => {
+  const c = await checkout(); const other = await createUser(); const admin = await createAdmin();
+  const paid = await verify(c, signed(c.checkout, gateway.__pay(c.checkout.orderId)));
+  const id = paid.body.data.booking._id;
+  expect((await request(app).get(`/api/tickets/${id}`).set(auth(other.token))).status).toBe(404);
+  const ticket = await request(app).get(`/api/tickets/${id}`).set(auth(c.token));
+  expect(ticket.body.data.qrDataUrl).toMatch(/^data:image\/png;base64,/);
+  const pdf = await request(app).get(`/api/tickets/${id}/pdf`).set(auth(c.token));
+  expect(pdf.status).toBe(200); expect(pdf.headers['content-type']).toContain('application/pdf');
+  expect(pdf.body.subarray(0, 4).toString()).toBe('%PDF');
+  const token = ticket.body.data.token;
+  expect((await request(app).post('/api/tickets/validate').set(auth(c.token)).send({ token })).status).toBe(403);
+  expect((await request(app).post('/api/tickets/validate').set(auth(admin.token)).send({ token: `${token.slice(0, -1)}${token.endsWith('a') ? 'b' : 'a'}` })).status).toBe(400);
+  await Show.updateOne({ _id: c.show._id }, { startTime: new Date(Date.now() + 3600000) });
+  expect((await request(app).post('/api/tickets/check-in').set(auth(admin.token)).send({ token })).status).toBe(200);
+  expect((await request(app).post('/api/tickets/check-in').set(auth(admin.token)).send({ token })).status).toBe(409);
+  expect((await request(app).delete(`/api/bookings/${id}`).set(auth(c.token))).status).toBe(409);
+});
+it('invalidates refunded tickets and refunds cancelled shows', async () => {
+  const c = await checkout(); const admin = await createAdmin();
+  const paid = await verify(c, signed(c.checkout, gateway.__pay(c.checkout.orderId)));
+  const ticket = await request(app).get(`/api/tickets/${paid.body.data.booking._id}`).set(auth(c.token));
+  await request(app).patch(`/api/shows/${c.show._id}`).set(auth(admin.token)).send({ status: 'CANCELLED' });
+  await service.reconcile(c.checkout._id, c.user);
+  expect((await Payment.findById(c.checkout._id)).state).toBe('REFUNDED');
+  expect((await request(app).post('/api/tickets/validate').set(auth(admin.token)).send({ token: ticket.body.data.token })).status).toBe(409);
+});
