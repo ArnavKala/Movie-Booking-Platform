@@ -63,6 +63,17 @@ CLOUDINARY_API_SECRET
 CLOUDINARY_FOLDER
 ```
 
+Cloudinary uploads require all four Cloudinary variables to be configured in
+the backend Vercel project. They are not read from a local `.env` file during
+deployment. Enter values without surrounding quotes:
+
+```text
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+CLOUDINARY_FOLDER=goodshow/movies
+```
+
 Do not upload `.env` or put backend secrets in the frontend project. Update
 `PUBLIC_APP_URL` to the deployed frontend URL before using payment callbacks.
 Set `CORS_ORIGINS` to the comma-separated frontend origins, for example

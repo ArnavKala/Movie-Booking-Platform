@@ -4,7 +4,11 @@ const dotenv = require('dotenv');
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const trimEnv = (value) => value?.trim();
+const trimEnv = (value) => {
+  const trimmed = value?.trim();
+  if (!trimmed) return trimmed;
+  return trimmed.replace(/^(['"])(.*)\1$/, '$2').trim();
+};
 
 if (NODE_ENV !== 'test') {
   const missing = ['MONGODB_URI', 'JWT_SECRET'].filter((key) => !process.env[key]);
